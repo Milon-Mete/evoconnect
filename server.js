@@ -826,20 +826,25 @@ app.post('/api/services/create-order', async (req, res) => {
         paymentRequired: false
       });
     }
-
-    if (service.pricingType === 'one_time') {
-      if (!buyerId) {
-        return res.status(401).json({ message: 'You must be logged in to purchase this service.', loginRequired: true });
+if (service.pricingType === 'one_time') {
+      // Create a search query to check if they already bought it
+      let purchaseQuery = { serviceId, paymentStatus: 'paid', type: 'one_time' };
+      
+      if (buyerId) {
+        purchaseQuery.buyerId = buyerId;
+      } else {
+        // If not logged in, check if this email already bought it
+        purchaseQuery.buyerEmail = buyerEmail.trim().toLowerCase();
       }
-      const alreadyPurchased = await ServiceTransaction.findOne({
-        serviceId, buyerId, paymentStatus: 'paid', type: 'one_time'
-      });
+
+      const alreadyPurchased = await ServiceTransaction.findOne(purchaseQuery);
+      
       if (alreadyPurchased) {
         return res.status(409).json({
-          message:          'You have already purchased this service. Access it from your dashboard.',
+          message: 'You have already purchased this service.',
           alreadyPurchased: true,
-          redirectUrl:      alreadyPurchased.redirectUrl || service.redirectUrl || null,
-          transactionId:    alreadyPurchased._id
+          redirectUrl: alreadyPurchased.redirectUrl || service.redirectUrl || null,
+          transactionId: alreadyPurchased._id
         });
       }
     }
