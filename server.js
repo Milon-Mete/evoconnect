@@ -101,29 +101,26 @@ const userSchema = new mongoose.Schema({
 }, { timestamps: true, toJSON: toJSONConfig });
 
 // --- Episode ---
-// Each episode belongs to a seller (userId).
-// A seller can have many episodes — their full appearance history on the show.
 const episodeSchema = new mongoose.Schema({
-  userId: { type: String, required: true, index: true },  // seller who appeared
+  userId: { type: String, required: true, index: true },
 
-  episodeNo:   { type: Number, required: true },          // e.g. 42
-  title:       { type: String, required: true },          // episode title
-  description: { type: String, default: '' },             // short blurb / summary
+  episodeNo:   { type: Number, required: true },
+  title:       { type: String, required: true },
+  description: { type: String, default: '' },
 
-  youtubeUrl:  { type: String, required: true },          // full YouTube URL
-  youtubeId:   { type: String, default: '' },             // extracted video ID for embeds / thumbnails
+  youtubeUrl:  { type: String, default: '' },
+  youtubeId:   { type: String, default: '' },
 
-  // Thumbnail: use custom if provided, otherwise auto-derive from youtubeId
   thumbnail:   { type: String, default: '' },
 
-  tags:        [{ type: String }],                        // e.g. ['startup', 'fintech', 'fundraising']
-  featuredTag: { type: String, default: '' },             // ONE highlighted tag shown as badge
+  tags:        [{ type: String }],
+  featuredTag: { type: String, default: '' },
 
-  duration:    { type: String, default: '' },             // human-readable, e.g. "45:30" or "1h 12m"
+  duration:    { type: String, default: '' },
 
-  guests:      [{ type: String }],                        // other guest names in the episode (optional)
+  guests:      [{ type: String }],
 
-  publishedAt: { type: Date, default: null },             // when the episode went live on YouTube
+  publishedAt: { type: Date, default: null },
 
   status: {
     type:    String,
@@ -131,22 +128,19 @@ const episodeSchema = new mongoose.Schema({
     default: 'published'
   },
 
-  views:       { type: Number, default: 0 },              // optional: can be updated manually or via YT API
-  likes:       { type: Number, default: 0 },              // optional
+  views:       { type: Number, default: 0 },
+  likes:       { type: Number, default: 0 },
 
-  // Admin notes (not shown publicly)
   adminNotes:  { type: String, default: '' },
 
 }, { timestamps: true, toJSON: toJSONConfig });
 
-// Virtual: auto-thumbnail from YouTube if no custom thumbnail set
 episodeSchema.virtual('thumbnailUrl').get(function () {
   if (this.thumbnail) return this.thumbnail;
   if (this.youtubeId) return `https://img.youtube.com/vi/${this.youtubeId}/hqdefault.jpg`;
   return '';
 });
 
-// Helper: extract YouTube video ID from various URL formats
 function extractYouTubeId(url) {
   if (!url) return '';
   const patterns = [
@@ -172,10 +166,11 @@ const serviceSchema = new mongoose.Schema({
     enum:    ['lead', 'one_time', 'subscription'],
     default: 'lead'
   },
-  price: { type: Number, default: 0 }
+  price:            { type: Number, default: 0 },
+  requiresAddress:  { type: Boolean, default: false },  // ← NEW: shipping address gate
 }, { timestamps: true, toJSON: toJSONConfig });
 
-// --- Plan Order (seller buys an IRX plan) ---
+// --- Plan Order ---
 const orderSchema = new mongoose.Schema({
   userId:            String,
   razorpayOrderId:   String,
@@ -195,6 +190,15 @@ const serviceTransactionSchema = new mongoose.Schema({
   buyerEmail:        { type: String, required: true },
   buyerPhone:        { type: String, default: '' },
   message:           { type: String, default: '' },
+
+  // ── Shipping address (only populated when service.requiresAddress === true) ──
+  shippingAddress: {
+    line1:  { type: String, default: '' },
+    line2:  { type: String, default: '' },
+    city:   { type: String, default: '' },
+    state:  { type: String, default: '' },
+    pin:    { type: String, default: '' },
+  },
 
   amount:            { type: Number, default: 0 },
   platformFee:       { type: Number, default: 0 },
@@ -238,6 +242,18 @@ function verifyToken(req, res, next) {
     req.userRole = decoded.role;
     next();
   });
+}
+
+// Optional auth — attaches userId if token is valid but doesn't block the request
+function optionalAuth(req, res, next) {
+  const token = req.headers['authorization'];
+  if (!token) { next(); return; }
+  try {
+    const decoded = jwt.verify(token.split(' ')[1], JWT_SECRET);
+    req.userId   = decoded.id;
+    req.userRole = decoded.role;
+  } catch { /* invalid / expired — continue as guest */ }
+  next();
 }
 
 function verifySeller(req, res, next) {
@@ -353,46 +369,38 @@ app.post('/api/buyer-profile', verifyToken, async (req, res) => {
 });
 
 // ==========================================
-// ██████████████████████████████████████████
 // EPISODES — FULL CRUD
-// ██████████████████████████████████████████
-//
-// PUBLIC:
-//   GET  /api/episodes                    → all published episodes (for homepage feed etc.)
-//   GET  /api/episodes/seller/:sellerId   → all published episodes for one seller's profile
-//   GET  /api/episodes/:id               → single episode detail (public)
-//
-// SELLER (own episodes):
-//   GET    /api/my-episodes              → all my episodes (any status)
-//   POST   /api/my-episodes             → create episode
-//   PUT    /api/my-episodes/:id         → update episode
-//   DELETE /api/my-episodes/:id         → delete episode
-//
-// ADMIN:
-//   GET    /api/admin/episodes           → all episodes across all sellers
-//   POST   /api/admin/episodes           → create episode for any seller
-//   PUT    /api/admin/episodes/:id       → update any episode
-//   DELETE /api/admin/episodes/:id       → delete any episode
-//   PATCH  /api/admin/episodes/:id/status → change status
 // ==========================================
 
 // ── Helper: build safe episode object ──
-function formatEpisode(ep) {
+function formatEpisode(ep, includeVideo = true) {
   const obj = ep.toJSON ? ep.toJSON() : { ...ep };
-  // Attach computed thumbnail
+
+  // Always set hasVideo correctly based on the raw database fields
+  obj.hasVideo = !!(ep.youtubeId || (ep.youtubeUrl && extractYouTubeId(ep.youtubeUrl)));
+
+  // Thumbnail logic
   if (!obj.thumbnail && obj.youtubeId) {
     obj.thumbnailUrl = `https://img.youtube.com/vi/${obj.youtubeId}/hqdefault.jpg`;
   } else {
     obj.thumbnailUrl = obj.thumbnail || '';
   }
-  // Attach embed URL
-  if (obj.youtubeId) {
+
+  // Video URL stripping logic
+  if (includeVideo && obj.youtubeId) {
     obj.embedUrl = `https://www.youtube.com/embed/${obj.youtubeId}`;
+  } else if (!includeVideo) {
+    delete obj.youtubeUrl;
+    delete obj.youtubeId;
+    obj.embedUrl = null;
   }
+
   return obj;
 }
 
 // ── PUBLIC: all published episodes (paginated) ──
+// NOTE: youtubeUrl / youtubeId are NOT returned here — callers must use
+//       /api/episodes/purchased/:serviceId to get the full video data.
 app.get('/api/episodes', async (req, res) => {
   try {
     const page     = parseInt(req.query.page)  || 1;
@@ -416,11 +424,10 @@ app.get('/api/episodes', async (req, res) => {
       .skip((page - 1) * limit)
       .limit(limit);
 
-    // Enrich with seller name
     const enriched = await Promise.all(episodes.map(async ep => {
       const seller = await User.findById(ep.userId);
       return {
-        ...formatEpisode(ep),
+        ...formatEpisode(ep, false),  // ← no video URLs in public listing
         sellerName:  seller?.profile?.guestName  || 'Member',
         sellerImage: seller?.profile?.guestImage || '',
       };
@@ -438,7 +445,7 @@ app.get('/api/episodes', async (req, res) => {
   }
 });
 
-// ── PUBLIC: all published episodes for a specific seller ──
+// ── PUBLIC: all published episodes for a specific seller (no video URLs) ──
 app.get('/api/episodes/seller/:sellerId', async (req, res) => {
   try {
     const episodes = await Episode.find({
@@ -446,8 +453,75 @@ app.get('/api/episodes/seller/:sellerId', async (req, res) => {
       status: 'published'
     }).sort({ episodeNo: -1 });
 
-    res.json(episodes.map(formatEpisode));
+    res.json(episodes.map(ep => formatEpisode(ep, false)));
   } catch (err) {
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+
+// ── PURCHASED: episodes with full video data for a buyer who owns a service ──
+// Returns full youtubeUrl / youtubeId / embedUrl only if:
+//   a) the caller is authenticated AND
+//   b) they have a paid ServiceTransaction for the given serviceId
+// The serviceId links a service to its seller's episodes.
+app.get('/api/episodes/purchased/:serviceId', optionalAuth, async (req, res) => {
+  try {
+    const { serviceId } = req.params;
+    const service = await Service.findById(serviceId);
+    if (!service) return res.status(404).json({ message: 'Service not found.' });
+
+    const sellerId = service.userId;
+    let hasPurchased = false;
+
+    if (req.userId) {
+      // FIX: Grant the seller access to their own service
+      if (req.userId === sellerId) {
+        hasPurchased = true;
+      } else {
+        // Existing buyer checks...
+        const txnById = await ServiceTransaction.findOne({
+          serviceId,
+          buyerId:       req.userId,
+          paymentStatus: { $in: ['paid', 'not_required'] }
+        });
+        if (txnById) hasPurchased = true;
+
+        if (!hasPurchased) {
+          const user = await User.findById(req.userId);
+          if (user) {
+            const txnByEmail = await ServiceTransaction.findOne({
+              serviceId,
+              buyerEmail:    user.email.toLowerCase().trim(),
+              paymentStatus: { $in: ['paid', 'not_required'] }
+            });
+            if (txnByEmail) hasPurchased = true;
+          }
+        }
+      }
+    }
+// ... rest of the route
+
+    // Fetch published episodes for this seller
+    const episodes = await Episode.find({
+      userId: sellerId,
+      status: 'published'
+    }).sort({ episodeNo: -1 });
+
+    if (hasPurchased) {
+      // Full data including video URLs
+      res.json({
+        purchased: true,
+        episodes:  episodes.map(ep => formatEpisode(ep, true))
+      });
+    } else {
+      // Teaser data — no video URLs, but enough to render locked cards
+      res.json({
+        purchased: false,
+        episodes:  episodes.map(ep => formatEpisode(ep, false))
+      });
+    }
+  } catch (err) {
+    console.error(err);
     res.status(500).json({ message: 'Server error' });
   }
 });
@@ -461,7 +535,7 @@ app.get('/api/episodes/:id', async (req, res) => {
     }
     const seller = await User.findById(episode.userId);
     res.json({
-      ...formatEpisode(episode),
+      ...formatEpisode(episode, false),  // public detail — no video
       sellerName:       seller?.profile?.guestName        || 'Member',
       sellerImage:      seller?.profile?.guestImage       || '',
       sellerCategory:   seller?.profile?.businessCategory || '',
@@ -476,17 +550,13 @@ app.get('/api/episodes/:id', async (req, res) => {
 app.get('/api/my-episodes', verifyToken, verifySeller, async (req, res) => {
   try {
     const episodes = await Episode.find({ userId: req.userId }).sort({ episodeNo: -1 });
-    res.json(episodes.map(formatEpisode));
+    res.json(episodes.map(ep => formatEpisode(ep, true)));  // sellers always see full data
   } catch (err) {
     res.status(500).json({ message: 'Server error' });
   }
 });
 
 // ── SELLER: create episode ──
-// Body fields:
-//   episodeNo (required), title (required), youtubeUrl (required),
-//   description, tags (array), featuredTag, duration, guests (array),
-//   publishedAt, thumbnail, status
 app.post('/api/my-episodes', verifyToken, verifySeller, async (req, res) => {
   try {
     const {
@@ -496,12 +566,11 @@ app.post('/api/my-episodes', verifyToken, verifySeller, async (req, res) => {
 
     if (!episodeNo)   return res.status(400).json({ message: 'episodeNo is required.' });
     if (!title)       return res.status(400).json({ message: 'Episode title is required.' });
-    if (!youtubeUrl)  return res.status(400).json({ message: 'YouTube URL is required.' });
+const youtubeId = youtubeUrl ? extractYouTubeId(youtubeUrl.trim()) : '';
+if (youtubeUrl && !youtubeId) {
+  return res.status(400).json({ message: 'Could not extract a valid YouTube video ID from the URL.' });
+}
 
-    const youtubeId = extractYouTubeId(youtubeUrl);
-    if (!youtubeId) return res.status(400).json({ message: 'Could not extract a valid YouTube video ID from the URL.' });
-
-    // Check duplicate episode number for this seller
     const existing = await Episode.findOne({ userId: req.userId, episodeNo });
     if (existing) return res.status(409).json({ message: `Episode #${episodeNo} already exists for your account.` });
 
@@ -510,7 +579,7 @@ app.post('/api/my-episodes', verifyToken, verifySeller, async (req, res) => {
       episodeNo:   parseInt(episodeNo),
       title:       title.trim(),
       description: description ? description.trim() : '',
-      youtubeUrl:  youtubeUrl.trim(),
+      youtubeUrl:  youtubeUrl ? youtubeUrl.trim() : '',
       youtubeId,
       thumbnail:   thumbnail || '',
       tags:        Array.isArray(tags) ? tags.map(t => t.trim().toLowerCase()) : [],
@@ -522,7 +591,7 @@ app.post('/api/my-episodes', verifyToken, verifySeller, async (req, res) => {
     });
 
     await episode.save();
-    res.status(201).json(formatEpisode(episode));
+    res.status(201).json(formatEpisode(episode, true));
   } catch (err) {
     console.error(err);
     res.status(500).json({ message: 'Server error' });
@@ -543,7 +612,6 @@ app.put('/api/my-episodes/:id', verifyToken, verifySeller, async (req, res) => {
       if (req.body[f] !== undefined) episode[f] = req.body[f];
     });
 
-    // If youtubeUrl updated, re-extract ID
     if (req.body.youtubeUrl) {
       const newId = extractYouTubeId(req.body.youtubeUrl);
       if (!newId) return res.status(400).json({ message: 'Invalid YouTube URL.' });
@@ -559,7 +627,7 @@ app.put('/api/my-episodes/:id', verifyToken, verifySeller, async (req, res) => {
     }
 
     await episode.save();
-    res.json(formatEpisode(episode));
+    res.json(formatEpisode(episode, true));
   } catch (err) {
     console.error(err);
     res.status(500).json({ message: 'Server error' });
@@ -585,7 +653,7 @@ app.get('/api/admin/episodes', verifyAdmin, async (req, res) => {
     const enriched = await Promise.all(episodes.map(async ep => {
       const seller = await User.findById(ep.userId);
       return {
-        ...formatEpisode(ep),
+        ...formatEpisode(ep, true),
         sellerName:  seller?.profile?.guestName || 'Unknown',
         sellerEmail: seller?.email              || '',
       };
@@ -618,7 +686,7 @@ app.post('/api/admin/episodes', verifyAdmin, async (req, res) => {
       episodeNo:   parseInt(episodeNo),
       title:       title.trim(),
       description: description ? description.trim() : '',
-      youtubeUrl:  youtubeUrl.trim(),
+      youtubeUrl:  youtubeUrl ? youtubeUrl.trim() : '',
       youtubeId,
       thumbnail:   thumbnail   || '',
       tags:        Array.isArray(tags)   ? tags.map(t => t.trim().toLowerCase()) : [],
@@ -633,7 +701,7 @@ app.post('/api/admin/episodes', verifyAdmin, async (req, res) => {
     });
 
     await episode.save();
-    res.status(201).json(formatEpisode(episode));
+    res.status(201).json(formatEpisode(episode, true));
   } catch (err) {
     console.error(err);
     res.status(500).json({ message: 'Server error' });
@@ -661,7 +729,7 @@ app.put('/api/admin/episodes/:id', verifyAdmin, async (req, res) => {
     if (req.body.guests && Array.isArray(req.body.guests)) episode.guests = req.body.guests.map(g => g.trim());
 
     await episode.save();
-    res.json(formatEpisode(episode));
+    res.json(formatEpisode(episode, true));
   } catch (err) {
     res.status(500).json({ message: 'Server error' });
   }
@@ -820,31 +888,29 @@ app.post('/api/services/create-order', async (req, res) => {
       await txn.save();
 
       return res.status(201).json({
-        message:         'Enquiry submitted successfully!',
-        redirectUrl:     service.redirectUrl || null,
-        transactionId:   txn._id,
-        paymentRequired: false
+        message:          'Enquiry submitted successfully!',
+        redirectUrl:      service.redirectUrl || null,
+        transactionId:    txn._id,
+        paymentRequired:  false,
+        requiresAddress:  service.requiresAddress || false,
       });
     }
-if (service.pricingType === 'one_time') {
-      // Create a search query to check if they already bought it
+
+    if (service.pricingType === 'one_time') {
       let purchaseQuery = { serviceId, paymentStatus: 'paid', type: 'one_time' };
-      
       if (buyerId) {
         purchaseQuery.buyerId = buyerId;
       } else {
-        // If not logged in, check if this email already bought it
         purchaseQuery.buyerEmail = buyerEmail.trim().toLowerCase();
       }
-
       const alreadyPurchased = await ServiceTransaction.findOne(purchaseQuery);
-      
       if (alreadyPurchased) {
         return res.status(409).json({
-          message: 'You have already purchased this service.',
+          message:          'You have already purchased this service.',
           alreadyPurchased: true,
-          redirectUrl: alreadyPurchased.redirectUrl || service.redirectUrl || null,
-          transactionId: alreadyPurchased._id
+          redirectUrl:      alreadyPurchased.redirectUrl || service.redirectUrl || null,
+          transactionId:    alreadyPurchased._id,
+          requiresAddress:  service.requiresAddress || false,
         });
       }
     }
@@ -890,7 +956,8 @@ if (service.pricingType === 'one_time') {
       currency:        razorpayOrder.currency,
       keyId:           process.env.RAZORPAY_KEY_ID,
       transactionId:   txn._id,
-      paymentRequired: true
+      paymentRequired: true,
+      requiresAddress: service.requiresAddress || false,
     });
   } catch (err) {
     console.error(err);
@@ -921,17 +988,77 @@ app.post('/api/services/verify-payment', async (req, res) => {
 
     if (!txn) return res.status(404).json({ message: 'Transaction not found.' });
 
-    res.json({ message: 'Service purchase confirmed!', redirectUrl: txn.redirectUrl || null, transactionId: txn._id });
+    // Check if associated service requires address
+    const service = await Service.findById(txn.serviceId);
+    const requiresAddress = service?.requiresAddress || false;
+
+    res.json({
+      message:         'Service purchase confirmed!',
+      redirectUrl:     txn.redirectUrl || null,
+      transactionId:   txn._id,
+      requiresAddress,
+    });
   } catch (err) {
     console.error(err);
     res.status(500).json({ message: 'Service payment verification error.' });
   }
 });
 
+// ── NEW: Save / update shipping address on a transaction ──
+app.post('/api/services/save-address', optionalAuth, async (req, res) => {
+  try {
+    const { transactionId, buyerEmail, address } = req.body;
+
+    if (!address || !address.line1 || !address.city || !address.state || !address.pin) {
+      return res.status(400).json({ message: 'Address is incomplete. Please fill all required fields.' });
+    }
+
+    let txn = null;
+
+    if (transactionId) {
+      txn = await ServiceTransaction.findById(transactionId);
+    }
+
+    // Also allow lookup by buyerId + serviceId if transactionId not supplied
+    if (!txn && req.userId && req.body.serviceId) {
+      txn = await ServiceTransaction.findOne({
+        serviceId:     req.body.serviceId,
+        buyerId:       req.userId,
+        paymentStatus: { $in: ['paid', 'not_required'] }
+      });
+    }
+
+    // Fallback: lookup by email + serviceId
+    if (!txn && buyerEmail && req.body.serviceId) {
+      txn = await ServiceTransaction.findOne({
+        serviceId:     req.body.serviceId,
+        buyerEmail:    buyerEmail.toLowerCase().trim(),
+        paymentStatus: { $in: ['paid', 'not_required'] }
+      });
+    }
+
+    if (!txn) return res.status(404).json({ message: 'Transaction not found.' });
+
+    txn.shippingAddress = {
+      line1: address.line1.trim(),
+      line2: (address.line2 || '').trim(),
+      city:  address.city.trim(),
+      state: address.state.trim(),
+      pin:   address.pin.trim(),
+    };
+    await txn.save();
+
+    res.json({ message: 'Shipping address saved successfully.', shippingAddress: txn.shippingAddress });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: 'Server error.' });
+  }
+});
+
 app.get('/api/my-purchases', verifyToken, async (req, res) => {
   try {
     const transactions = await ServiceTransaction
-      .find({ buyerId: req.userId, paymentStatus: 'paid' })
+      .find({ buyerId: req.userId, paymentStatus: { $in: ['paid', 'not_required'] } })
       .sort({ createdAt: -1 });
 
     const enriched = await Promise.all(transactions.map(async txn => {
@@ -939,9 +1066,10 @@ app.get('/api/my-purchases', verifyToken, async (req, res) => {
       const seller  = await User.findById(txn.sellerId);
       return {
         ...txn.toJSON(),
-        serviceName: service?.serviceName           || 'Deleted Service',
-        sellerName:  seller?.profile?.guestName     || 'Unknown Seller',
-        redirectUrl: txn.redirectUrl || service?.redirectUrl || null
+        serviceName:     service?.serviceName           || 'Deleted Service',
+        sellerName:      seller?.profile?.guestName     || 'Unknown Seller',
+        redirectUrl:     txn.redirectUrl || service?.redirectUrl || null,
+        requiresAddress: service?.requiresAddress       || false,
       };
     }));
 
@@ -1061,7 +1189,7 @@ app.get('/api/guests/:id', async (req, res) => {
     if (!user || !user.profile) return res.status(404).json({ message: 'Guest not found.' });
     const services = await Service.find({ userId: req.params.id });
 
-    // Include published episodes in the profile response
+    // Public profile shows episodes WITHOUT video URLs (gated behind purchase)
     const episodes = await Episode.find({
       userId: req.params.id,
       status: 'published'
@@ -1072,7 +1200,7 @@ app.get('/api/guests/:id', async (req, res) => {
       episodeStatus: user.episodeStatus,
       profile:       user.profile,
       services,
-      episodes:      episodes.map(formatEpisode)
+      episodes:      episodes.map(ep => formatEpisode(ep, false))
     });
   } catch (err) {
     res.status(500).json({ message: 'Server error' });
@@ -1122,7 +1250,8 @@ app.post('/api/services', verifyToken, verifySeller, async (req, res) => {
       thumbnailUrl:       req.body.thumbnailUrl,
       category:           req.body.category || 'General',
       pricingType,
-      price
+      price,
+      requiresAddress:    req.body.requiresAddress === true || req.body.requiresAddress === 'true',
     });
     await service.save();
     res.json(service);
@@ -1136,7 +1265,7 @@ app.put('/api/services/:id', verifyToken, verifySeller, async (req, res) => {
     const service = await Service.findOne({ _id: req.params.id, userId: req.userId });
     if (!service) return res.status(404).json({ message: 'Service not found or not yours.' });
 
-    const fields = ['serviceName', 'serviceDescription', 'redirectUrl', 'thumbnailUrl', 'category', 'pricingType', 'price'];
+    const fields = ['serviceName', 'serviceDescription', 'redirectUrl', 'thumbnailUrl', 'category', 'pricingType', 'price', 'requiresAddress'];
     fields.forEach(f => { if (req.body[f] !== undefined) service[f] = req.body[f]; });
     if (service.pricingType === 'lead') service.price = 0;
 
@@ -1168,32 +1297,16 @@ app.get('/api/my-sales', verifyToken, verifySeller, async (req, res) => {
       .find({ sellerId: req.userId })
       .sort({ createdAt: -1 });
 
-    // ── Enrich with service names ──
     const enriched = await Promise.all(transactions.map(async txn => {
       const service = await Service.findById(txn.serviceId);
-      return { ...txn.toJSON(), serviceName: service?.serviceName || 'Deleted Service' };
+      return {
+        ...txn.toJSON(),
+        serviceName:     service?.serviceName     || 'Deleted Service',
+        requiresAddress: service?.requiresAddress || false,
+      };
     }));
 
-    // ── Deduplication logic ──
-    //
-    // Problem: a buyer can submit multiple records for the same service —
-    //   • a free lead enquiry
-    //   • a failed payment attempt
-    //   • a pending payment
-    //   • eventually a paid transaction
-    //
-    // We want ONE row per (buyerEmail + serviceId) pair, always showing
-    // the most meaningful / latest state.
-    //
-    // Priority rank (lower number = wins the slot):
-    //   0  paid           → buyer successfully purchased — always show this
-    //   1  pending        → payment initiated but not confirmed yet
-    //   2  not_required   → free lead captured (no payment needed)
-    //   3  failed         → payment failed — only shown when nothing better exists
-    //
-    // CRM status (pending/contacted/converted/closed) lives on the winning record
-    // and is fully editable by the seller — it doesn't affect deduplication.
-
+    // ── Deduplication ──
     function paymentPriority(txn) {
       switch (txn.paymentStatus) {
         case 'paid':          return 0;
@@ -1204,36 +1317,19 @@ app.get('/api/my-sales', verifyToken, verifySeller, async (req, res) => {
       }
     }
 
-    // key = normalised email + serviceId so we catch both logged-in buyers
-    // (who may have a buyerId) and anonymous enquiries (email only).
     const deduped = new Map();
-
     for (const txn of enriched) {
       const key = `${(txn.buyerEmail || '').toLowerCase().trim()}__${txn.serviceId}`;
       const existing = deduped.get(key);
-
-      if (!existing) {
-        deduped.set(key, txn);
-        continue;
-      }
-
+      if (!existing) { deduped.set(key, txn); continue; }
       const newRank = paymentPriority(txn);
       const exRank  = paymentPriority(existing);
-
-      if (newRank < exRank) {
-        // New record is higher priority — replace
-        deduped.set(key, txn);
-      }
-      // Tie-break: transactions are already sorted newest-first (createdAt -1),
-      // so `existing` is already the most recent for the same priority — keep it.
+      if (newRank < exRank) deduped.set(key, txn);
     }
 
     const dedupedList = Array.from(deduped.values());
-
-    // Re-sort deduplicated list by createdAt desc (order may have shifted during dedup)
     dedupedList.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
 
-    // ── Summary computed from deduplicated list ──
     const totalLeads   = dedupedList.length;
     const converted    = dedupedList.filter(t => t.status === 'converted').length;
     const paidSales    = dedupedList.filter(t => t.paymentStatus === 'paid');
@@ -1394,10 +1490,11 @@ app.get('/api/admin/service-sales', verifyAdmin, async (req, res) => {
       const buyer   = await User.findById(txn.buyerId);
       return {
         ...txn.toJSON(),
-        serviceName:  service?.serviceName       || 'Deleted Service',
-        sellerName:   seller?.profile?.guestName || 'Unknown Seller',
-        sellerEmail:  seller?.email              || '',
-        buyerAccount: buyer?.email               || txn.buyerEmail
+        serviceName:     service?.serviceName       || 'Deleted Service',
+        requiresAddress: service?.requiresAddress   || false,
+        sellerName:      seller?.profile?.guestName || 'Unknown Seller',
+        sellerEmail:     seller?.email              || '',
+        buyerAccount:    buyer?.email               || txn.buyerEmail
       };
     }));
 
@@ -1488,7 +1585,7 @@ app.get('/api/admin/stats', verifyAdmin, async (req, res) => {
         guestName: u.profile?.guestName || '', createdAt: u.createdAt
       })),
       recentLeads,
-      recentEpisodes: recentEpisodes.map(formatEpisode)
+      recentEpisodes: recentEpisodes.map(ep => formatEpisode(ep, true))
     });
   } catch (err) {
     res.status(500).json({ message: 'Server error' });
