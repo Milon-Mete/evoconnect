@@ -166,6 +166,11 @@ const serviceSchema = new mongoose.Schema({
     enum:    ['lead', 'one_time', 'subscription'],
     default: 'lead'
   },
+  benefits: [{
+  title:       { type: String, default: '' },
+  description: { type: String, default: '' },
+  icon:        { type: String, default: '' }, // emoji or URL
+}],
   price:            { type: Number, default: 0 },
   requiresAddress:  { type: Boolean, default: false },  // ← NEW: shipping address gate
 }, { timestamps: true, toJSON: toJSONConfig });
@@ -1249,6 +1254,7 @@ app.post('/api/services', verifyToken, verifySeller, async (req, res) => {
       redirectUrl:        req.body.redirectUrl,
       thumbnailUrl:       req.body.thumbnailUrl,
       category:           req.body.category || 'General',
+      benefits: Array.isArray(req.body.benefits) ? req.body.benefits : [],
       pricingType,
       price,
       requiresAddress:    req.body.requiresAddress === true || req.body.requiresAddress === 'true',
@@ -1265,7 +1271,7 @@ app.put('/api/services/:id', verifyToken, verifySeller, async (req, res) => {
     const service = await Service.findOne({ _id: req.params.id, userId: req.userId });
     if (!service) return res.status(404).json({ message: 'Service not found or not yours.' });
 
-    const fields = ['serviceName', 'serviceDescription', 'redirectUrl', 'thumbnailUrl', 'category', 'pricingType', 'price', 'requiresAddress'];
+    const fields = ['serviceName', 'serviceDescription', 'redirectUrl', 'thumbnailUrl', 'category', 'pricingType', 'price', 'requiresAddress', 'benefits'];
     fields.forEach(f => { if (req.body[f] !== undefined) service[f] = req.body[f]; });
     if (service.pricingType === 'lead') service.price = 0;
 
