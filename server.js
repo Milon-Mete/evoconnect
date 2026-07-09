@@ -130,7 +130,22 @@ const serviceSchema = new mongoose.Schema({
   thumbnailUrl: { type: String, maxlength: 500 },
   category: { type: String, default: 'General', maxlength: 100 },
   pricingType: { type: String, enum: ['lead', 'one_time', 'subscription'], default: 'lead' },
-  benefits: [{ title: { type: String, default: '', maxlength: 200 }, description: { type: String, default: '', maxlength: 500 }, icon: { type: String, default: '', maxlength: 100 } }],
+  benefits: [{ 
+    title: { type: String, default: '', maxlength: 200 }, 
+    description: { type: String, default: '', maxlength: 500 }, 
+    icon: { type: String, default: '', maxlength: 100 } 
+  }],
+  // NEW HYBRID FIELDS
+  eventDate: { type: Date, default: null },
+  scheduleText: { type: String, default: '', maxlength: 200 },
+  duration: { type: String, default: '', maxlength: 100 },
+  format: { type: String, default: '', maxlength: 100 },
+  language: { type: String, default: '', maxlength: 50 },
+  eventTime: { type: String, default: '', maxlength: 100 },
+  whatYouWillLearn: [{ 
+    topic: { type: String, maxlength: 250 }, 
+    icon: { type: String, default: 'check_circle', maxlength: 50 } 
+  }],
   price: { type: Number, default: 0 },
   requiresAddress: { type: Boolean, default: false },
 }, { timestamps: true, toJSON: toJ });
@@ -198,9 +213,25 @@ const couponRedemptionSchema = new mongoose.Schema({
 const Coupon = mongoose.model('Coupon', couponSchema);
 const CouponRedemption = mongoose.model('CouponRedemption', couponRedemptionSchema);
 
+const serviceExtraSchema = new mongoose.Schema({
+  userId: { type: String, required: true, index: true },
+  serviceId: { type: String, default: '' },
+  title: { type: String, required: true, maxlength: 300 },
+  description: { type: String, default: '', maxlength: 5000 },
+  videoUrl: { type: String, default: '', maxlength: 500 },
+  thumbnail: { type: String, default: '', maxlength: 500 },
+  tags: [{ type: String, maxlength: 60 }],
+  featuredTag: { type: String, default: '', maxlength: 60 },
+  duration: { type: String, default: '', maxlength: 20 },
+  publishedAt: { type: Date, default: null },
+  status: { type: String, enum: ['draft', 'published', 'archived'], default: 'published' },
+  sortOrder: { type: Number, default: 0 },
+}, { timestamps: true, toJSON: toJ });
+
 const User = mongoose.model('Usere', userSchema);
 const Episode = mongoose.model('Episode', episodeSchema);
 const Service = mongoose.model('Servicee', serviceSchema);
+const ServiceExtra = mongoose.model('ServiceExtra', serviceExtraSchema);
 const Order = mongoose.model('Order', orderSchema);
 const ServiceTransaction = mongoose.model('ServiceTransaction', serviceTransactionSchema);
 
@@ -922,20 +953,71 @@ app.post('/api/services', verifyToken, verifySeller, async (req, res) => {
   try {
     const u = await User.findById(req.userId);
     if (!u || u.plan === 'none') return res.status(403).json({ message: 'Purchase a package first.' });
+    
     const pricingType = req.body.pricingType || 'lead';
     const price = pricingType === 'lead' ? 0 : (parseInt(req.body.price) || 0);
-    const s = await new Service({ userId: req.userId, serviceName: req.body.serviceName, serviceDescription: req.body.serviceDescription, redirectUrl: req.body.redirectUrl, thumbnailUrl: req.body.thumbnailUrl, category: req.body.category || 'General', benefits: Array.isArray(req.body.benefits) ? req.body.benefits : [], pricingType, price, requiresAddress: req.body.requiresAddress === true || req.body.requiresAddress === 'true' }).save();
+    
+    // Parse new hybrid fields safely
+    const eventDate = req.body.eventDate ? new Date(req.body.eventDate) : null;
+    const eventTime = req.body.eventTime || '';
+    const whatYouWillLearn = Array.isArray(req.body.whatYouWillLearn) ? req.body.whatYouWillLearn : [];
+
+    const s = await new Service({ 
+      userId: req.userId, 
+      serviceName: req.body.serviceName, 
+      serviceDescription: req.body.serviceDescription, 
+      redirectUrl: req.body.redirectUrl, 
+      thumbnailUrl: req.body.thumbnailUrl, 
+      scheduleText: req.body.scheduleText || '',
+      duration: req.body.duration || '',
+      format: req.body.format || '',
+      language: req.body.language || '',
+      category: req.body.category || 'General', 
+      benefits: Array.isArray(req.body.benefits) ? req.body.benefits : [], 
+      eventDate,
+      eventTime,
+      whatYouWillLearn,
+      pricingType, 
+      price, 
+      requiresAddress: req.body.requiresAddress === true || req.body.requiresAddress === 'true' 
+    }).save();
+    
     res.json(s);
-  } catch { res.status(500).json({ message: 'Server error' }); }
+  } catch (err) { 
+    console.error(err); 
+    res.status(500).json({ message: 'Server error', error: err.message }); 
+  }
 });
 app.put('/api/services/:id', verifyToken, verifySeller, async (req, res) => {
   try {
     const s = await Service.findOne({ _id: req.params.id, userId: req.userId });
     if (!s) return res.status(404).json({ message: 'Not found.' });
-    ['serviceName', 'serviceDescription', 'redirectUrl', 'thumbnailUrl', 'category', 'pricingType', 'price', 'requiresAddress', 'benefits'].forEach(f => { if (req.body[f] !== undefined) s[f] = req.body[f]; });
+    
+    // Process standard string/array fields
+const updatableFields = [
+      'serviceName', 'serviceDescription', 'redirectUrl', 'thumbnailUrl', 
+      'category', 'pricingType', 'price', 'requiresAddress', 'benefits', 
+      'eventTime', 'whatYouWillLearn', 'scheduleText', 'duration', 'format', 'language'
+    ];
+    
+    updatableFields.forEach(f => { 
+      if (req.body[f] !== undefined) s[f] = req.body[f]; 
+    });
+
+    // Handle date casting explicitly
+    if (req.body.eventDate !== undefined) {
+      s.eventDate = req.body.eventDate ? new Date(req.body.eventDate) : null;
+    }
+
+    // Enforce pricing logic
     if (s.pricingType === 'lead') s.price = 0;
-    await s.save(); res.json(s);
-  } catch { res.status(500).json({ message: 'Server error' }); }
+    
+    await s.save(); 
+    res.json(s);
+  } catch (err) { 
+    console.error(err); 
+    res.status(500).json({ message: 'Server error', error: err.message }); 
+  }
 });
 app.delete('/api/services/:id', verifyToken, verifySeller, async (req, res) => {
   try {
@@ -979,6 +1061,117 @@ app.patch('/api/my-sales/:txnId', verifyToken, verifySeller, async (req, res) =>
     if (!t) return res.status(404).json({ message: 'Not found.' });
     t.status = status; await t.save(); res.json({ message: 'Updated.', status: t.status });
   } catch { res.status(500).json({ message: 'Server error' }); }
+});
+
+// ── Service Extras (Seller) ──
+app.get('/api/my-service-extras', verifyToken, verifySeller, async (req, res) => {
+  try { res.json(await ServiceExtra.find({ userId: req.userId }).sort({ sortOrder: -1, createdAt: -1 })); }
+  catch (err) { res.status(500).json({ message: 'Server error' }); }
+});
+
+app.post('/api/my-service-extras', verifyToken, verifySeller, async (req, res) => {
+  try {
+    const { title, description, videoUrl, thumbnail, tags, featuredTag, duration, publishedAt, status, sortOrder, serviceId } = req.body;
+    if (!title) return res.status(400).json({ message: 'Title is required.' });
+    const se = new ServiceExtra({
+      userId: req.userId,
+      serviceId: serviceId || '',
+      title: title.trim(),
+      description: description?.trim() || '',
+      videoUrl: videoUrl?.trim() || '',
+      thumbnail: thumbnail || '',
+      tags: Array.isArray(tags) ? tags.map(t => t.trim().toLowerCase()) : [],
+      featuredTag: featuredTag?.trim() || '',
+      duration: duration?.trim() || '',
+      publishedAt: publishedAt ? new Date(publishedAt) : null,
+      status: ['draft', 'published', 'archived'].includes(status) ? status : 'published',
+      sortOrder: sortOrder || 0,
+    });
+    await se.save();
+    res.status(201).json(se.toJSON ? se.toJSON() : se);
+  } catch (err) { console.error(err); res.status(500).json({ message: 'Server error' }); }
+});
+
+app.put('/api/my-service-extras/:id', verifyToken, verifySeller, async (req, res) => {
+  try {
+    const se = await ServiceExtra.findOne({ _id: req.params.id, userId: req.userId });
+    if (!se) return res.status(404).json({ message: 'Service extra not found.' });
+    ['title', 'description', 'videoUrl', 'thumbnail', 'tags', 'featuredTag', 'duration', 'publishedAt', 'status', 'sortOrder', 'serviceId'].forEach(f => {
+      if (req.body[f] !== undefined) se[f] = req.body[f];
+    });
+    if (req.body.tags && Array.isArray(req.body.tags)) se.tags = req.body.tags.map(t => t.trim().toLowerCase());
+    await se.save();
+    res.json(se.toJSON ? se.toJSON() : se);
+  } catch (err) { console.error(err); res.status(500).json({ message: 'Server error' }); }
+});
+
+app.delete('/api/my-service-extras/:id', verifyToken, verifySeller, async (req, res) => {
+  try {
+    const se = await ServiceExtra.findOne({ _id: req.params.id, userId: req.userId });
+    if (!se) return res.status(404).json({ message: 'Service extra not found.' });
+    await ServiceExtra.deleteOne({ _id: req.params.id });
+    res.json({ message: 'Service extra deleted.' });
+  } catch { res.status(500).json({ message: 'Server error' }); }
+});
+
+// ── Service Extras (Public) ──
+app.get('/api/service-extras/:sellerId', async (req, res) => {
+  try {
+    const extras = await ServiceExtra.find({ userId: req.params.sellerId, status: 'published' }).sort({ sortOrder: -1, createdAt: -1 });
+    res.json(extras);
+  } catch (err) { res.status(500).json({ message: 'Server error' }); }
+});
+
+app.get('/api/service-extras/service/:serviceId', async (req, res) => {
+  try {
+    const extras = await ServiceExtra.find({ serviceId: req.params.serviceId, status: 'published' }).sort({ sortOrder: -1, createdAt: -1 });
+    res.json(extras);
+  } catch (err) { res.status(500).json({ message: 'Server error' }); }
+});
+
+// ── Service Extras (Admin) ──
+app.get('/api/admin/service-extras', verifyAdmin, async (req, res) => {
+  try {
+    const extras = await ServiceExtra.find().sort({ createdAt: -1 });
+    const uMap = await getUserMap(extras.map(e => e.userId));
+    res.json({ total: extras.length, extras: extras.map(e => ({ ...(e.toJSON ? e.toJSON() : e), sellerName: uMap[e.userId]?.profile?.guestName || 'Unknown', sellerEmail: uMap[e.userId]?.email || '' })) });
+  } catch { res.status(500).json({ message: 'Server error' }); }
+});
+
+app.post('/api/admin/service-extras', verifyAdmin, async (req, res) => {
+  try {
+    const { userId, title, description, videoUrl, thumbnail, tags, featuredTag, duration, publishedAt, status, sortOrder, serviceId } = req.body;
+    if (!userId || !title) return res.status(400).json({ message: 'userId and title required.' });
+    const se = new ServiceExtra({
+      userId, serviceId: serviceId || '', title: title.trim(), description: description?.trim() || '',
+      videoUrl: videoUrl?.trim() || '', thumbnail: thumbnail || '',
+      tags: Array.isArray(tags) ? tags.map(t => t.trim().toLowerCase()) : [],
+      featuredTag: featuredTag?.trim() || '', duration: duration?.trim() || '',
+      publishedAt: publishedAt ? new Date(publishedAt) : null,
+      status: ['draft', 'published', 'archived'].includes(status) ? status : 'published',
+      sortOrder: sortOrder || 0,
+    });
+    await se.save();
+    res.status(201).json(se.toJSON ? se.toJSON() : se);
+  } catch (err) { console.error(err); res.status(500).json({ message: 'Server error' }); }
+});
+
+app.put('/api/admin/service-extras/:id', verifyAdmin, async (req, res) => {
+  try {
+    const se = await ServiceExtra.findById(req.params.id);
+    if (!se) return res.status(404).json({ message: 'Not found.' });
+    ['title', 'description', 'videoUrl', 'thumbnail', 'tags', 'featuredTag', 'duration', 'publishedAt', 'status', 'sortOrder', 'userId', 'serviceId'].forEach(f => {
+      if (req.body[f] !== undefined) se[f] = req.body[f];
+    });
+    if (req.body.tags && Array.isArray(req.body.tags)) se.tags = req.body.tags.map(t => t.trim().toLowerCase());
+    await se.save();
+    res.json(se.toJSON ? se.toJSON() : se);
+  } catch { res.status(500).json({ message: 'Server error' }); }
+});
+
+app.delete('/api/admin/service-extras/:id', verifyAdmin, async (req, res) => {
+  try { await ServiceExtra.findByIdAndDelete(req.params.id); res.json({ message: 'Deleted.' }); }
+  catch { res.status(500).json({ message: 'Server error' }); }
 });
 
 // ── Admin ──
