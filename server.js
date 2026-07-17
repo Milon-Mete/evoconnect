@@ -235,6 +235,24 @@ const ServiceExtra = mongoose.model('ServiceExtra', serviceExtraSchema);
 const Order = mongoose.model('Order', orderSchema);
 const ServiceTransaction = mongoose.model('ServiceTransaction', serviceTransactionSchema);
 
+// ── Service Extra helpers ──
+function formatServiceExtra(extra, includeVideo = true) {
+  const obj = extra.toJSON ? extra.toJSON() : { ...extra };
+  const ytId = obj.videoUrl ? extractYouTubeId(obj.videoUrl) : '';
+  obj.youtubeId = ytId;
+  obj.hasVideo = !!(obj.videoUrl && obj.videoUrl.trim());
+  obj.thumbnailUrl = obj.thumbnail || (ytId ? `https://img.youtube.com/vi/${ytId}/hqdefault.jpg` : '');
+  if (includeVideo && ytId) {
+    obj.embedUrl = `https://www.youtube.com/embed/${ytId}?rel=0&autoplay=1`;
+  } else if (includeVideo && obj.videoUrl) {
+    obj.embedUrl = obj.videoUrl;
+  } else {
+    delete obj.videoUrl;
+    obj.embedUrl = null;
+  }
+  return obj;
+}
+
 // ── Middleware ──
 function verifyToken(req, res, next) {
   const token = req.headers['authorization'];
@@ -1065,7 +1083,10 @@ app.patch('/api/my-sales/:txnId', verifyToken, verifySeller, async (req, res) =>
 
 // ── Service Extras (Seller) ──
 app.get('/api/my-service-extras', verifyToken, verifySeller, async (req, res) => {
-  try { res.json(await ServiceExtra.find({ userId: req.userId }).sort({ sortOrder: -1, createdAt: -1 })); }
+  try {
+    const extras = await ServiceExtra.find({ userId: req.userId }).sort({ sortOrder: -1, createdAt: -1 });
+    res.json(extras.map(e => formatServiceExtra(e, true)));
+  }
   catch (err) { res.status(500).json({ message: 'Server error' }); }
 });
 
@@ -1088,7 +1109,7 @@ app.post('/api/my-service-extras', verifyToken, verifySeller, async (req, res) =
       sortOrder: sortOrder || 0,
     });
     await se.save();
-    res.status(201).json(se.toJSON ? se.toJSON() : se);
+    res.status(201).json(formatServiceExtra(se, true));
   } catch (err) { console.error(err); res.status(500).json({ message: 'Server error' }); }
 });
 
@@ -1101,7 +1122,7 @@ app.put('/api/my-service-extras/:id', verifyToken, verifySeller, async (req, res
     });
     if (req.body.tags && Array.isArray(req.body.tags)) se.tags = req.body.tags.map(t => t.trim().toLowerCase());
     await se.save();
-    res.json(se.toJSON ? se.toJSON() : se);
+    res.json(formatServiceExtra(se, true));
   } catch (err) { console.error(err); res.status(500).json({ message: 'Server error' }); }
 });
 
@@ -1114,19 +1135,42 @@ app.delete('/api/my-service-extras/:id', verifyToken, verifySeller, async (req, 
   } catch { res.status(500).json({ message: 'Server error' }); }
 });
 
-// ── Service Extras (Public) ──
+// ── Service Extras (Public / Gated) ──
+// Public: returns extras WITHOUT video URLs (like episodes without includeVideo)
 app.get('/api/service-extras/:sellerId', async (req, res) => {
   try {
     const extras = await ServiceExtra.find({ userId: req.params.sellerId, status: 'published' }).sort({ sortOrder: -1, createdAt: -1 });
-    res.json(extras);
+    res.json(extras.map(e => formatServiceExtra(e, false)));
   } catch (err) { res.status(500).json({ message: 'Server error' }); }
 });
 
 app.get('/api/service-extras/service/:serviceId', async (req, res) => {
   try {
     const extras = await ServiceExtra.find({ serviceId: req.params.serviceId, status: 'published' }).sort({ sortOrder: -1, createdAt: -1 });
-    res.json(extras);
+    res.json(extras.map(e => formatServiceExtra(e, false)));
   } catch (err) { res.status(500).json({ message: 'Server error' }); }
+});
+
+// Gated: returns extras WITH video URLs only if user purchased this service
+app.get('/api/service-extras/purchased/:serviceId', optionalAuth, async (req, res) => {
+  try {
+    const service = await Service.findById(req.params.serviceId);
+    if (!service) return res.status(404).json({ message: 'Service not found.' });
+    let hasPurchased = false;
+    if (req.userId) {
+      if (req.userId === service.userId) { hasPurchased = true; }
+      else {
+        const t1 = await ServiceTransaction.findOne({ serviceId: req.params.serviceId, buyerId: req.userId, paymentStatus: { $in: ['paid', 'not_required'] } });
+        if (t1) hasPurchased = true;
+        if (!hasPurchased) {
+          const u = await User.findById(req.userId);
+          if (u) { const t2 = await ServiceTransaction.findOne({ serviceId: req.params.serviceId, buyerEmail: u.email.toLowerCase().trim(), paymentStatus: { $in: ['paid', 'not_required'] } }); if (t2) hasPurchased = true; }
+        }
+      }
+    }
+    const extras = await ServiceExtra.find({ serviceId: req.params.serviceId, status: 'published' }).sort({ sortOrder: -1, createdAt: -1 });
+    res.json({ purchased: hasPurchased, extras: extras.map(e => formatServiceExtra(e, hasPurchased)) });
+  } catch (err) { console.error(err); res.status(500).json({ message: 'Server error' }); }
 });
 
 // ── Service Extras (Admin) ──
@@ -1134,7 +1178,7 @@ app.get('/api/admin/service-extras', verifyAdmin, async (req, res) => {
   try {
     const extras = await ServiceExtra.find().sort({ createdAt: -1 });
     const uMap = await getUserMap(extras.map(e => e.userId));
-    res.json({ total: extras.length, extras: extras.map(e => ({ ...(e.toJSON ? e.toJSON() : e), sellerName: uMap[e.userId]?.profile?.guestName || 'Unknown', sellerEmail: uMap[e.userId]?.email || '' })) });
+    res.json({ total: extras.length, extras: extras.map(e => ({ ...formatServiceExtra(e, true), sellerName: uMap[e.userId]?.profile?.guestName || 'Unknown', sellerEmail: uMap[e.userId]?.email || '' })) });
   } catch { res.status(500).json({ message: 'Server error' }); }
 });
 
